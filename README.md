@@ -17,7 +17,7 @@ A production-style DevOps project that demonstrates:
 flowchart LR
     Dev[Developer Push]
     GH[GitHub Repository]
-    J[Jenkins Server (Ubuntu VM)]
+    J[Jenkins Server - Ubuntu VM]
     AWS[AWS CLI]
     EC2[EC2 Instance]
 
