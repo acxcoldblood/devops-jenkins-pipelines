@@ -1,0 +1,131 @@
+pipeline {
+    agent any
+
+    parameters {
+        choice(
+            name: 'ACTION',
+            choices: ['START', 'STOP', 'REBOOT'],
+            description: 'Select action for EC2 instance'
+        )
+        
+        string(
+            name: 'INSTANCE_ID',
+            defaultValue: '',
+            description: 'Enter EC2 Instance ID (e.g., i-0123456789abcdef0)'
+        )
+    }
+
+    environment {
+        REGION = "ap-south-1"
+    }
+
+    stages {
+
+        stage('Validate Input') {
+            steps {
+                script {
+                    if (!params.INSTANCE_ID?.trim()) {
+                        error "INSTANCE_ID cannot be empty!"
+                    }
+                }
+            }
+        }
+
+        stage('Check Current State') {
+            steps {
+                script {
+                    CURRENT_STATE = sh(
+                        script: """
+                        aws ec2 describe-instances \
+                        --instance-ids ${params.INSTANCE_ID} \
+                        --region ${REGION} \
+                        --query "Reservations[].Instances[].State.Name" \
+                        --output text
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Current Instance State: ${CURRENT_STATE}"
+                }
+            }
+        }
+
+        stage('Perform Action') {
+            steps {
+                script {
+
+                    if (params.ACTION == 'START') {
+
+                        if (CURRENT_STATE == 'running') {
+                            echo "Instance already running. Skipping START."
+                        } else {
+                            echo "Starting instance..."
+                            sh """
+                            aws ec2 start-instances \
+                            --instance-ids ${params.INSTANCE_ID} \
+                            --region ${REGION}
+                            """
+                        }
+
+                    } else if (params.ACTION == 'STOP') {
+
+                        if (CURRENT_STATE == 'stopped') {
+                            echo "Instance already stopped. Skipping STOP."
+                        } else {
+                            echo "Stopping instance..."
+                            sh """
+                            aws ec2 stop-instances \
+                            --instance-ids ${params.INSTANCE_ID} \
+                            --region ${REGION}
+                            """
+                        }
+
+                    } else if (params.ACTION == 'REBOOT') {
+
+                        echo "Rebooting instance (Stop → Wait → Start)..."
+
+                        if (CURRENT_STATE != 'stopped') {
+                            sh """
+                            aws ec2 stop-instances \
+                            --instance-ids ${params.INSTANCE_ID} \
+                            --region ${REGION}
+                            """
+                            
+                            echo "Waiting for instance to stop..."
+                            sh """
+                            aws ec2 wait instance-stopped \
+                            --instance-ids ${params.INSTANCE_ID} \
+                            --region ${REGION}
+                            """
+                        }
+
+                        sh """
+                        aws ec2 start-instances \
+                        --instance-ids ${params.INSTANCE_ID} \
+                        --region ${REGION}
+                        """
+
+                        echo "Waiting for instance to start..."
+                        sh """
+                        aws ec2 wait instance-running \
+                        --instance-ids ${params.INSTANCE_ID} \
+                        --region ${REGION}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Final Status') {
+            steps {
+                sh """
+                aws ec2 describe-instances \
+                --instance-ids ${params.INSTANCE_ID} \
+                --region ${REGION} \
+                --query "Reservations[].Instances[].State.Name" \
+                --output text
+                """
+            }
+        }
+    }
+}
