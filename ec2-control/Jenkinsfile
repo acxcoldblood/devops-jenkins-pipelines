@@ -7,16 +7,23 @@ pipeline {
             choices: ['START', 'STOP', 'REBOOT'],
             description: 'Select action for EC2 instance'
         )
-        
+
         string(
             name: 'INSTANCE_ID',
             defaultValue: '',
             description: 'Enter EC2 Instance ID (e.g., i-0123456789abcdef0)'
         )
-    }
 
-    environment {
-        REGION = "ap-south-1"
+        choice(
+            name: 'REGION',
+            choices: [
+                'ap-south-1',
+                'us-east-1',
+                'us-west-2',
+                'eu-west-1'
+            ],
+            description: 'Select AWS Region'
+        )
     }
 
     stages {
@@ -31,86 +38,44 @@ pipeline {
             }
         }
 
-        stage('Check Current State') {
+        stage('EC2 Lifecycle Control') {
             steps {
-                script {
-                    CURRENT_STATE = sh(
-                        script: """
-                        aws ec2 describe-instances \
-                        --instance-ids ${params.INSTANCE_ID} \
-                        --region ${REGION} \
-                        --query "Reservations[].Instances[].State.Name" \
-                        --output text
-                        """,
-                        returnStdout: true
-                    ).trim()
+                withAWS(credentials: 'aws-jenkins-creds', region: "${params.REGION}") {
 
-                    echo "Current Instance State: ${CURRENT_STATE}"
-                }
-            }
-        }
+                    script {
 
-        stage('Perform Action') {
-            steps {
-                script {
-
-                    if (params.ACTION == 'START') {
-
-                        if (CURRENT_STATE == 'running') {
-                            echo "Instance already running. Skipping START."
-                        } else {
-                            echo "Starting instance..."
-                            sh """
-                            aws ec2 start-instances \
+                        CURRENT_STATE = sh(
+                            script: """
+                            aws ec2 describe-instances \
                             --instance-ids ${params.INSTANCE_ID} \
-                            --region ${REGION}
-                            """
+                            --query "Reservations[].Instances[].State.Name" \
+                            --output text
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        echo "Current Instance State: ${CURRENT_STATE}"
+
+                        if (params.ACTION == 'START') {
+
+                            if (CURRENT_STATE == 'running') {
+                                echo "Instance already running."
+                            } else {
+                                sh "aws ec2 start-instances --instance-ids ${params.INSTANCE_ID}"
+                            }
+
+                        } else if (params.ACTION == 'STOP') {
+
+                            if (CURRENT_STATE == 'stopped') {
+                                echo "Instance already stopped."
+                            } else {
+                                sh "aws ec2 stop-instances --instance-ids ${params.INSTANCE_ID}"
+                            }
+
+                        } else if (params.ACTION == 'REBOOT') {
+
+                            sh "aws ec2 reboot-instances --instance-ids ${params.INSTANCE_ID}"
                         }
-
-                    } else if (params.ACTION == 'STOP') {
-
-                        if (CURRENT_STATE == 'stopped') {
-                            echo "Instance already stopped. Skipping STOP."
-                        } else {
-                            echo "Stopping instance..."
-                            sh """
-                            aws ec2 stop-instances \
-                            --instance-ids ${params.INSTANCE_ID} \
-                            --region ${REGION}
-                            """
-                        }
-
-                    } else if (params.ACTION == 'REBOOT') {
-
-                        echo "Rebooting instance (Stop → Wait → Start)..."
-
-                        if (CURRENT_STATE != 'stopped') {
-                            sh """
-                            aws ec2 stop-instances \
-                            --instance-ids ${params.INSTANCE_ID} \
-                            --region ${REGION}
-                            """
-                            
-                            echo "Waiting for instance to stop..."
-                            sh """
-                            aws ec2 wait instance-stopped \
-                            --instance-ids ${params.INSTANCE_ID} \
-                            --region ${REGION}
-                            """
-                        }
-
-                        sh """
-                        aws ec2 start-instances \
-                        --instance-ids ${params.INSTANCE_ID} \
-                        --region ${REGION}
-                        """
-
-                        echo "Waiting for instance to start..."
-                        sh """
-                        aws ec2 wait instance-running \
-                        --instance-ids ${params.INSTANCE_ID} \
-                        --region ${REGION}
-                        """
                     }
                 }
             }
@@ -118,13 +83,14 @@ pipeline {
 
         stage('Final Status') {
             steps {
-                sh """
-                aws ec2 describe-instances \
-                --instance-ids ${params.INSTANCE_ID} \
-                --region ${REGION} \
-                --query "Reservations[].Instances[].State.Name" \
-                --output text
-                """
+                withAWS(credentials: 'aws-jenkins-creds', region: "${params.REGION}") {
+                    sh """
+                    aws ec2 describe-instances \
+                    --instance-ids ${params.INSTANCE_ID} \
+                    --query "Reservations[].Instances[].State.Name" \
+                    --output text
+                    """
+                }
             }
         }
     }
