@@ -1,97 +1,132 @@
 pipeline {
-    agent any
+agent any
 
-    parameters {
-        choice(
-            name: 'ACTION',
-            choices: ['START', 'STOP', 'REBOOT'],
-            description: 'Select action for EC2 instance'
-        )
+```
+parameters {
+    choice(
+        name: 'ACTION',
+        choices: ['START', 'STOP', 'REBOOT'],
+        description: 'Select action for EC2 instances'
+    )
 
-        string(
-            name: 'INSTANCE_ID',
-            defaultValue: '',
-            description: 'Enter EC2 Instance ID (e.g., i-0123456789abcdef0)'
-        )
+    string(
+        name: 'TAG_KEY',
+        defaultValue: 'AutoSchedule',
+        description: 'EC2 Tag Key'
+    )
 
-        choice(
-            name: 'REGION',
-            choices: [
-                'ap-south-1',
-                'us-east-1',
-                'us-west-2',
-                'eu-west-1'
-            ],
-            description: 'Select AWS Region'
-        )
-    }
+    string(
+        name: 'TAG_VALUE',
+        defaultValue: 'OfficeHours',
+        description: 'EC2 Tag Value'
+    )
 
-    stages {
+    choice(
+        name: 'REGION',
+        choices: [
+            'ap-south-1',
+            'us-east-1',
+            'us-west-2',
+            'eu-west-1'
+        ],
+        description: 'Select AWS Region'
+    )
+}
 
-        stage('Validate Input') {
-            steps {
+stages {
+
+    stage('Fetch Instances By Tag') {
+        steps {
+            withAWS(credentials: 'aws-jenkins-creds', region: "${params.REGION}") {
                 script {
-                    if (!params.INSTANCE_ID?.trim()) {
-                        error "INSTANCE_ID cannot be empty!"
+
+                    echo "Searching instances with tag ${params.TAG_KEY}=${params.TAG_VALUE}"
+
+                    env.INSTANCE_IDS = sh(
+                        script: """
+                        aws ec2 describe-instances \
+                        --filters "Name=tag:${params.TAG_KEY},Values=${params.TAG_VALUE}" \
+                        --query "Reservations[].Instances[].InstanceId" \
+                        --output text
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    if (!env.INSTANCE_IDS) {
+                        error "No instances found with tag ${params.TAG_KEY}=${params.TAG_VALUE}"
                     }
-                }
-            }
-        }
 
-        stage('EC2 Lifecycle Control') {
-            steps {
-                withAWS(credentials: 'aws-jenkins-creds', region: "${params.REGION}") {
-
-                    script {
-
-                        CURRENT_STATE = sh(
-                            script: """
-                            aws ec2 describe-instances \
-                            --instance-ids ${params.INSTANCE_ID} \
-                            --query "Reservations[].Instances[].State.Name" \
-                            --output text
-                            """,
-                            returnStdout: true
-                        ).trim()
-
-                        echo "Current Instance State: ${CURRENT_STATE}"
-
-                        if (params.ACTION == 'START') {
-
-                            if (CURRENT_STATE == 'running') {
-                                echo "Instance already running."
-                            } else {
-                                sh "aws ec2 start-instances --instance-ids ${params.INSTANCE_ID}"
-                            }
-
-                        } else if (params.ACTION == 'STOP') {
-
-                            if (CURRENT_STATE == 'stopped') {
-                                echo "Instance already stopped."
-                            } else {
-                                sh "aws ec2 stop-instances --instance-ids ${params.INSTANCE_ID}"
-                            }
-
-                        } else if (params.ACTION == 'REBOOT') {
-
-                            sh "aws ec2 reboot-instances --instance-ids ${params.INSTANCE_ID}"
-                        }
-                    }
-                }
-            }
-        }
-
-        stage('Final Status') {
-            steps {
-                withAWS(credentials: 'aws-jenkins-creds', region: "${params.REGION}") {
-                    sh """
-                    aws ec2 describe-instances \
-                    --instance-ids ${params.INSTANCE_ID} \
-                    --query "Reservations[].Instances[].State.Name" \
-                    --output text
-                    """
+                    echo "Instances Found: ${env.INSTANCE_IDS}"
                 }
             }
         }
     }
+
+    stage('Execute EC2 Action') {
+        steps {
+            withAWS(credentials: 'aws-jenkins-creds', region: "${params.REGION}") {
+                script {
+
+                    echo "Action Selected: ${params.ACTION}"
+
+                    if (params.ACTION == 'START') {
+
+                        sh """
+                        aws ec2 start-instances \
+                        --instance-ids ${env.INSTANCE_IDS}
+                        """
+
+                    } else if (params.ACTION == 'STOP') {
+
+                        sh """
+                        aws ec2 stop-instances \
+                        --instance-ids ${env.INSTANCE_IDS}
+                        """
+
+                    } else if (params.ACTION == 'REBOOT') {
+
+                        echo "Performing HARD reboot"
+
+                        sh """
+                        aws ec2 stop-instances \
+                        --instance-ids ${env.INSTANCE_IDS}
+                        """
+
+                        echo "Waiting for instances to stop..."
+
+                        sh """
+                        aws ec2 wait instance-stopped \
+                        --instance-ids ${env.INSTANCE_IDS}
+                        """
+
+                        sh """
+                        aws ec2 start-instances \
+                        --instance-ids ${env.INSTANCE_IDS}
+                        """
+
+                        echo "Instances restarted successfully"
+                    }
+                }
+            }
+        }
+    }
+
+    stage('Verify Status') {
+        steps {
+            withAWS(credentials: 'aws-jenkins-creds', region: "${params.REGION}") {
+
+                echo "Checking final instance status..."
+
+                sh """
+                aws ec2 describe-instances \
+                --instance-ids ${env.INSTANCE_IDS} \
+                --query "Reservations[].Instances[].State.Name" \
+                --output table
+                """
+            }
+        }
+    }
+}
+```
+
 }
