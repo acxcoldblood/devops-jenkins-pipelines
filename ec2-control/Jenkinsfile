@@ -16,7 +16,7 @@ parameters {
     choice(
         name: 'ACTION',
         choices: ['START', 'STOP', 'REBOOT'],
-        description: 'Select action for EC2 instances'
+        description: 'Action to perform in MANUAL mode'
     )
 
     string(
@@ -39,34 +39,40 @@ parameters {
             'us-west-2',
             'eu-west-1'
         ],
-        description: 'Select AWS Region'
+        description: 'AWS Region'
     )
 }
 
 stages {
 
-    stage('Fetch Instances By Tag') {
+    stage('Fetch Instance Data') {
         steps {
             withAWS(credentials: 'aws-jenkins-creds', region: "${params.REGION}") {
                 script {
 
-                    echo "Searching instances with tag ${params.TAG_KEY}=${params.TAG_VALUE}"
+                    echo "Fetching instance data with tag ${params.TAG_KEY}=${params.TAG_VALUE}"
 
-                    env.INSTANCE_IDS = sh(
+                    env.INSTANCE_DATA = sh(
                         script: """
                         aws ec2 describe-instances \
-                        --filters "Name=tag:${params.TAG_KEY},Values=${params.TAG_VALUE}" \
-                        --query "Reservations[].Instances[].InstanceId" \
+                        --filters Name=tag:${params.TAG_KEY},Values=${params.TAG_VALUE} \
+                        --query "Reservations[].Instances[].[
+                            InstanceId,
+                            State.Name,
+                            Tags[?Key=='StartTime']|[0].Value,
+                            Tags[?Key=='StopTime']|[0].Value
+                        ]" \
                         --output text
                         """,
                         returnStdout: true
                     ).trim()
 
-                    if (!env.INSTANCE_IDS) {
+                    if (!env.INSTANCE_DATA) {
                         error "No instances found with tag ${params.TAG_KEY}=${params.TAG_VALUE}"
                     }
 
-                    echo "Instances Found: ${env.INSTANCE_IDS}"
+                    echo "Instance Data:"
+                    echo "${env.INSTANCE_DATA}"
                 }
             }
         }
@@ -77,55 +83,50 @@ stages {
             withAWS(credentials: 'aws-jenkins-creds', region: "${params.REGION}") {
                 script {
 
-                    if (params.MODE == 'MANUAL') {
+                    def CURRENT_HOUR = sh(
+                        script: "date +%H",
+                        returnStdout: true
+                    ).trim()
 
-                        echo "Manual Mode: ${params.ACTION}"
+                    echo "Current hour: ${CURRENT_HOUR}"
 
-                        if (params.ACTION == 'START') {
+                    def lines = env.INSTANCE_DATA.split("\\n")
 
-                            sh "aws ec2 start-instances --instance-ids ${env.INSTANCE_IDS}"
+                    for (line in lines) {
 
-                        } else if (params.ACTION == 'STOP') {
+                        def parts = line.trim().split()
 
-                            sh "aws ec2 stop-instances --instance-ids ${env.INSTANCE_IDS}"
+                        def id = parts[0]
+                        def state = parts[1]
+                        def start = parts.size() > 2 ? parts[2] : "00"
+                        def stop = parts.size() > 3 ? parts[3] : "24"
 
-                        } else if (params.ACTION == 'REBOOT') {
+                        echo "Instance ${id} | state=${state} | start=${start} | stop=${stop}"
 
-                            echo "Performing HARD reboot"
+                        if (params.MODE == 'MANUAL') {
 
-                            sh "aws ec2 stop-instances --instance-ids ${env.INSTANCE_IDS}"
-                            sh "aws ec2 wait instance-stopped --instance-ids ${env.INSTANCE_IDS}"
-                            sh "aws ec2 start-instances --instance-ids ${env.INSTANCE_IDS}"
-                        }
+                            echo "Manual Mode"
 
-                    } else {
+                            if (params.ACTION == 'START') {
 
-                        echo "AUTO scheduling mode"
+                                sh "aws ec2 start-instances --instance-ids ${id}"
 
-                        CURRENT_HOUR = sh(
-                            script: "date +%H",
-                            returnStdout: true
-                        ).trim()
+                            } else if (params.ACTION == 'STOP') {
 
-                        echo "Current hour: ${CURRENT_HOUR}"
+                                sh "aws ec2 stop-instances --instance-ids ${id}"
 
-                        sh """
-                        aws ec2 describe-instances \
-                        --instance-ids ${env.INSTANCE_IDS} \
-                        --query 'Reservations[].Instances[].{ID:InstanceId,State:State.Name,Start:Tags[?Key==`StartTime`]|[0].Value,Stop:Tags[?Key==`StopTime`]|[0].Value}' \
-                        --output json > instances.json
-                        """
+                            } else if (params.ACTION == 'REBOOT') {
 
-                        def instances = readJSON file: 'instances.json'
+                                echo "Hard reboot"
 
-                        for (i in instances) {
+                                sh "aws ec2 stop-instances --instance-ids ${id}"
+                                sh "aws ec2 wait instance-stopped --instance-ids ${id}"
+                                sh "aws ec2 start-instances --instance-ids ${id}"
+                            }
 
-                            def id = i.ID
-                            def state = i.State
-                            def start = i.Start
-                            def stop = i.Stop
+                        } else {
 
-                            echo "Instance ${id} | state=${state} | start=${start} | stop=${stop}"
+                            echo "AUTO scheduling mode"
 
                             def desiredState = "stopped"
 
@@ -137,22 +138,21 @@ stages {
 
                             if (state == desiredState) {
 
-                                echo "SKIP: instance already in correct state"
+                                echo "SKIP: instance already correct"
 
                             } else if (desiredState == "running") {
 
-                                echo "Starting instance ${id}"
+                                echo "Starting ${id}"
                                 sh "aws ec2 start-instances --instance-ids ${id}"
 
                             } else {
 
-                                echo "Stopping instance ${id}"
+                                echo "Stopping ${id}"
                                 sh "aws ec2 stop-instances --instance-ids ${id}"
 
                             }
 
                         }
-
                     }
                 }
             }
@@ -163,16 +163,18 @@ stages {
         steps {
             withAWS(credentials: 'aws-jenkins-creds', region: "${params.REGION}") {
 
-                echo "Checking final instance status..."
+                echo "Final instance status"
 
                 sh """
                 aws ec2 describe-instances \
-                --instance-ids ${env.INSTANCE_IDS} \
+                --filters Name=tag:${params.TAG_KEY},Values=${params.TAG_VALUE} \
                 --query "Reservations[].Instances[].State.Name" \
                 --output table
                 """
+
             }
         }
     }
 }
+
 }
